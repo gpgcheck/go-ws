@@ -427,8 +427,8 @@ func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time
 		smartPing = strings.ToLower(smartStr) == "true"
 	}
 
-	// 从环境变量获取压缩支持，默认为启用
-	enableCompression := true
+	// 从环境变量获取压缩支持，默认为禁用（获得更高带宽）
+	enableCompression := false
 	if compStr := os.Getenv("WS_ENABLE_COMPRESSION"); compStr != "" {
 		enableCompression = strings.ToLower(compStr) == "true"
 	}

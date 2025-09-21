@@ -40,7 +40,7 @@ go mod tidy
 - `WS_PING_INTERVAL`: 心跳间隔秒数 (默认: 120，进一步降低带宽占用)
 - `WS_STATUS_INTERVAL`: 状态报告间隔秒数 (默认: 30，降低日志输出)
 - `WS_SMART_PING`: 智能心跳 (默认: true，只在连接空闲时发送心跳)
-- `WS_ENABLE_COMPRESSION`: 启用压缩 (默认: true，启用WebSocket压缩)
+- `WS_ENABLE_COMPRESSION`: 启用压缩 (默认: false，禁用压缩以获得更高带宽)
 
 #### 使用环境变量
 ```bash
@@ -162,10 +162,10 @@ WS_CLIENTS=20 WS_URL=wss://example.com/ws LOG_LEVEL=debug WS_RECONNECT=true WS_M
    - 显著节省CPU和内存使用
    - 网络带宽使用不变
    - 适合压力测试和连接池场景
-10. **极致带宽优化**: 大幅降低网络带宽占用
+10. **智能带宽优化**: 平衡带宽使用和性能
     - 可配置心跳间隔（默认120秒，比原来30秒减少75%带宽）
     - 智能心跳机制（只在连接空闲时发送心跳，进一步节省带宽）
-    - WebSocket压缩支持（启用最佳压缩级别）
+    - WebSocket压缩支持（默认禁用，获得更高下载带宽）
     - 可配置状态报告间隔（默认30秒，减少日志输出频率）
     - 支持忽略消息模式进一步节省资源
 
