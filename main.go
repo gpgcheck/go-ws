@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -33,6 +34,8 @@ type WSClient struct {
 	LastActivity time.Time
 	PingCount    int
 	SmartPing    bool
+	closed       bool
+	mu           sync.Mutex
 }
 
 // 日志级别
@@ -218,6 +221,14 @@ func (c *WSClient) sendPing() {
 }
 
 func (c *WSClient) close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return
+	}
+	c.closed = true
+
 	close(c.Done)
 	if c.Conn != nil {
 		c.Conn.Close()
@@ -256,7 +267,9 @@ func (m *WSManager) startClient(client *WSClient) {
 				// 忽略消息模式：静默处理，不打印任何日志
 			}
 		case err := <-client.Errors:
-			logError("Client %d error: %v", client.ID, err)
+			if err != nil {
+				logError("Client %d error: %v", client.ID, err)
+			}
 			client.close()
 			return
 		case <-client.Done:
@@ -424,6 +437,9 @@ func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time
 }
 
 func main() {
+	// 抑制WebSocket库的噪音日志
+	log.SetOutput(io.Discard)
+
 	var (
 		numClients = flag.Int("clients", 0, "Number of concurrent WebSocket connections (overrides WS_CLIENTS env var)")
 		wsURL      = flag.String("url", "", "WebSocket URL to connect to (overrides WS_URL env var)")
@@ -434,6 +450,11 @@ func main() {
 		ignoreMsg  = flag.Bool("ignore-msg", false, "Ignore received messages (overrides WS_IGNORE_MSG env var)")
 	)
 	flag.Parse()
+
+	// 根据日志级别恢复日志输出
+	if currentLogLevel == DEBUG {
+		log.SetOutput(os.Stderr)
+	}
 
 	// 从环境变量获取配置
 	envClients, envURL, envLogLevel, envReconnect, envMaxRetries, envRetryDelay, envIgnoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression := getEnvConfig()
