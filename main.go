@@ -290,7 +290,7 @@ func (m *WSManager) startAllClients() {
 
 		// 根据连接数动态调整延迟（优化连接速度）
 		if !m.fastConnect {
-			delay := 10 * time.Millisecond  // 减少基础延迟
+			delay := 10 * time.Millisecond // 减少基础延迟
 			if m.numClients > 50 {
 				delay = 20 * time.Millisecond
 			}
