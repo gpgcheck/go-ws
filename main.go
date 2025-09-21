@@ -18,16 +18,17 @@ import (
 )
 
 type WSClient struct {
-	ID         int
-	URL        string
-	Conn       *websocket.Conn
-	Done       chan struct{}
-	Messages   chan []byte
-	Errors     chan error
-	Reconnect  bool
-	MaxRetries int
-	RetryDelay time.Duration
-	RetryCount int
+	ID           int
+	URL          string
+	Conn         *websocket.Conn
+	Done         chan struct{}
+	Messages     chan []byte
+	Errors       chan error
+	Reconnect    bool
+	MaxRetries   int
+	RetryDelay   time.Duration
+	RetryCount   int
+	PingInterval time.Duration
 }
 
 // 日志级别
@@ -52,40 +53,45 @@ func logDebug(format string, v ...interface{}) {
 }
 
 type WSManager struct {
-	clients    []*WSClient
-	numClients int
-	url        string
-	reconnect  bool
-	maxRetries int
-	retryDelay time.Duration
-	ignoreMsg  bool
-	mu         sync.RWMutex
-	wg         sync.WaitGroup
+	clients        []*WSClient
+	numClients     int
+	url            string
+	reconnect      bool
+	maxRetries     int
+	retryDelay     time.Duration
+	ignoreMsg      bool
+	pingInterval   time.Duration
+	statusInterval time.Duration
+	mu             sync.RWMutex
+	wg             sync.WaitGroup
 }
 
-func NewWSManager(url string, numClients int, reconnect bool, maxRetries int, retryDelay time.Duration, ignoreMsg bool) *WSManager {
+func NewWSManager(url string, numClients int, reconnect bool, maxRetries int, retryDelay time.Duration, ignoreMsg bool, pingInterval time.Duration, statusInterval time.Duration) *WSManager {
 	return &WSManager{
-		clients:    make([]*WSClient, 0, numClients),
-		numClients: numClients,
-		url:        url,
-		reconnect:  reconnect,
-		maxRetries: maxRetries,
-		retryDelay: retryDelay,
-		ignoreMsg:  ignoreMsg,
+		clients:        make([]*WSClient, 0, numClients),
+		numClients:     numClients,
+		url:            url,
+		reconnect:      reconnect,
+		maxRetries:     maxRetries,
+		retryDelay:     retryDelay,
+		ignoreMsg:      ignoreMsg,
+		pingInterval:   pingInterval,
+		statusInterval: statusInterval,
 	}
 }
 
 func (m *WSManager) createClient(id int) *WSClient {
 	return &WSClient{
-		ID:         id,
-		URL:        m.url,
-		Done:       make(chan struct{}),
-		Messages:   make(chan []byte, 100),
-		Errors:     make(chan error, 10),
-		Reconnect:  m.reconnect,
-		MaxRetries: m.maxRetries,
-		RetryDelay: m.retryDelay,
-		RetryCount: 0,
+		ID:           id,
+		URL:          m.url,
+		Done:         make(chan struct{}),
+		Messages:     make(chan []byte, 100),
+		Errors:       make(chan error, 10),
+		Reconnect:    m.reconnect,
+		MaxRetries:   m.maxRetries,
+		RetryDelay:   m.retryDelay,
+		RetryCount:   0,
+		PingInterval: m.pingInterval,
 	}
 }
 
@@ -158,7 +164,7 @@ func (c *WSClient) readMessages() {
 }
 
 func (c *WSClient) sendPing() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(c.PingInterval)
 	defer ticker.Stop()
 
 	for {
@@ -295,7 +301,7 @@ func loadEnvFile(filename string) error {
 }
 
 // getEnvConfig 从环境变量获取配置
-func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool) {
+func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time.Duration, time.Duration) {
 	// 首先尝试加载.env文件
 	if err := loadEnvFile(".env"); err != nil {
 		logDebug("未找到.env文件或加载失败: %v", err)
@@ -353,7 +359,23 @@ func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool) {
 		ignoreMsg = strings.ToLower(ignoreStr) == "true"
 	}
 
-	return numClients, wsURL, logLevel, reconnect, maxRetries, retryDelay, ignoreMsg
+	// 从环境变量获取心跳间隔，默认为60秒（降低带宽占用）
+	pingInterval := 60 * time.Second
+	if pingStr := os.Getenv("WS_PING_INTERVAL"); pingStr != "" {
+		if ping, err := strconv.Atoi(pingStr); err == nil && ping > 0 {
+			pingInterval = time.Duration(ping) * time.Second
+		}
+	}
+
+	// 从环境变量获取状态报告间隔，默认为30秒（降低日志输出）
+	statusInterval := 30 * time.Second
+	if statusStr := os.Getenv("WS_STATUS_INTERVAL"); statusStr != "" {
+		if status, err := strconv.Atoi(statusStr); err == nil && status > 0 {
+			statusInterval = time.Duration(status) * time.Second
+		}
+	}
+
+	return numClients, wsURL, logLevel, reconnect, maxRetries, retryDelay, ignoreMsg, pingInterval, statusInterval
 }
 
 func main() {
@@ -369,7 +391,7 @@ func main() {
 	flag.Parse()
 
 	// 从环境变量获取配置
-	envClients, envURL, envLogLevel, envReconnect, envMaxRetries, envRetryDelay, envIgnoreMsg := getEnvConfig()
+	envClients, envURL, envLogLevel, envReconnect, envMaxRetries, envRetryDelay, envIgnoreMsg, envPingInterval, envStatusInterval := getEnvConfig()
 
 	// 如果命令行参数为空，则使用环境变量
 	if *numClients == 0 {
@@ -418,11 +440,13 @@ func main() {
 	fmt.Printf("  最大重试次数: %d\n", *maxRetries)
 	fmt.Printf("  重试延迟: %d秒\n", *retryDelay)
 	fmt.Printf("  忽略消息: %t\n", *ignoreMsg)
+	fmt.Printf("  心跳间隔: %d秒\n", int(envPingInterval.Seconds()))
+	fmt.Printf("  状态报告间隔: %d秒\n", int(envStatusInterval.Seconds()))
 
 	fmt.Println()
 
 	// 创建WebSocket管理器
-	manager := NewWSManager(*wsURL, *numClients, *reconnect, *maxRetries, time.Duration(*retryDelay)*time.Second, *ignoreMsg)
+	manager := NewWSManager(*wsURL, *numClients, *reconnect, *maxRetries, time.Duration(*retryDelay)*time.Second, *ignoreMsg, envPingInterval, envStatusInterval)
 
 	// 设置信号处理
 	sigChan := make(chan os.Signal, 1)
@@ -432,7 +456,7 @@ func main() {
 	manager.startAllClients()
 
 	// 定期报告状态
-	statusTicker := time.NewTicker(10 * time.Second)
+	statusTicker := time.NewTicker(manager.statusInterval)
 	defer statusTicker.Stop()
 
 	// 主循环
