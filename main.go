@@ -110,7 +110,7 @@ func (m *WSManager) createClient(id int) *WSClient {
 	}
 }
 
-func (c *WSClient) connect() error {
+func (c *WSClient) connect(enableCompression bool) error {
 	u, err := url.Parse(c.URL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %v", err)
@@ -118,7 +118,7 @@ func (c *WSClient) connect() error {
 
 	// 配置WebSocket拨号器
 	dialer := websocket.DefaultDialer
-	dialer.EnableCompression = true
+	dialer.EnableCompression = enableCompression
 
 	// 建立WebSocket连接
 	conn, _, err := dialer.Dial(u.String(), nil)
@@ -129,11 +129,11 @@ func (c *WSClient) connect() error {
 	c.Conn = conn
 	c.RetryCount = 0 // 重置重试计数
 	c.LastActivity = time.Now()
-	logDebug("Client %d connected to %s", c.ID, c.URL)
+	logDebug("Client %d connected to %s (compression: %t)", c.ID, c.URL, enableCompression)
 	return nil
 }
 
-func (c *WSClient) reconnectWithRetry() bool {
+func (c *WSClient) reconnectWithRetry(m *WSManager) bool {
 	if !c.Reconnect || c.RetryCount >= c.MaxRetries {
 		return false
 	}
@@ -145,16 +145,16 @@ func (c *WSClient) reconnectWithRetry() bool {
 	time.Sleep(c.RetryDelay)
 
 	// 尝试重连
-	if err := c.connect(); err != nil {
+	if err := c.connect(m.enableCompression); err != nil {
 		logError("Client %d reconnect failed: %v", c.ID, err)
-		return c.reconnectWithRetry() // 递归重试
+		return c.reconnectWithRetry(m) // 递归重试
 	}
 
 	logDebug("Client %d reconnected successfully", c.ID)
 	return true
 }
 
-func (c *WSClient) readMessages() {
+func (c *WSClient) readMessages(m *WSManager) {
 	defer close(c.Messages)
 	defer close(c.Errors)
 
@@ -169,7 +169,7 @@ func (c *WSClient) readMessages() {
 					logError("Client %d connection lost: %v", c.ID, err)
 
 					// 尝试重连
-					if c.reconnectWithRetry() {
+					if c.reconnectWithRetry(m) {
 						continue // 重连成功，继续读取消息
 					} else {
 						c.Errors <- fmt.Errorf("connection lost and max retries exceeded: %v", err)
@@ -183,7 +183,7 @@ func (c *WSClient) readMessages() {
 	}
 }
 
-func (c *WSClient) sendPing() {
+func (c *WSClient) sendPing(m *WSManager) {
 	ticker := time.NewTicker(c.PingInterval)
 	defer ticker.Stop()
 
@@ -205,7 +205,7 @@ func (c *WSClient) sendPing() {
 				logError("Client %d ping failed: %v", c.ID, err)
 
 				// 尝试重连
-				if c.reconnectWithRetry() {
+				if c.reconnectWithRetry(m) {
 					continue // 重连成功，继续发送ping
 				} else {
 					c.Errors <- fmt.Errorf("ping failed and max retries exceeded: %v", err)
@@ -240,7 +240,7 @@ func (m *WSManager) startClient(client *WSClient) {
 	defer m.wg.Done()
 
 	// 连接WebSocket
-	if err := client.connect(); err != nil {
+	if err := client.connect(m.enableCompression); err != nil {
 		logError("Client %d failed to connect: %v", client.ID, err)
 		return
 	}
@@ -251,8 +251,8 @@ func (m *WSManager) startClient(client *WSClient) {
 	m.mu.Unlock()
 
 	// 启动消息读取和ping发送
-	go client.readMessages()
-	go client.sendPing()
+	go client.readMessages(m)
+	go client.sendPing(m)
 
 	// 处理消息和错误
 	for {

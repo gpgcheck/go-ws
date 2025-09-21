@@ -40,7 +40,9 @@ go mod tidy
 - `WS_PING_INTERVAL`: 心跳间隔秒数 (默认: 120，进一步降低带宽占用)
 - `WS_STATUS_INTERVAL`: 状态报告间隔秒数 (默认: 30，降低日志输出)
 - `WS_SMART_PING`: 智能心跳 (默认: true，只在连接空闲时发送心跳)
-- `WS_ENABLE_COMPRESSION`: 启用压缩 (默认: false，禁用压缩以获得更高带宽)
+- `WS_ENABLE_COMPRESSION`: 启用压缩 (默认: false，需要服务器支持)
+  - `false`: 禁用压缩，获得更高下载带宽
+  - `true`: 启用压缩，需要服务器端也支持压缩
 
 #### 使用环境变量
 ```bash
