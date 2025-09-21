@@ -71,11 +71,12 @@ type WSManager struct {
 	statusInterval    time.Duration
 	smartPing         bool
 	enableCompression bool
+	fastConnect       bool
 	mu                sync.RWMutex
 	wg                sync.WaitGroup
 }
 
-func NewWSManager(url string, numClients int, reconnect bool, maxRetries int, retryDelay time.Duration, ignoreMsg bool, pingInterval time.Duration, statusInterval time.Duration, smartPing bool, enableCompression bool) *WSManager {
+func NewWSManager(url string, numClients int, reconnect bool, maxRetries int, retryDelay time.Duration, ignoreMsg bool, pingInterval time.Duration, statusInterval time.Duration, smartPing bool, enableCompression bool, fastConnect bool) *WSManager {
 	return &WSManager{
 		clients:           make([]*WSClient, 0, numClients),
 		numClients:        numClients,
@@ -88,6 +89,7 @@ func NewWSManager(url string, numClients int, reconnect bool, maxRetries int, re
 		statusInterval:    statusInterval,
 		smartPing:         smartPing,
 		enableCompression: enableCompression,
+		fastConnect:       fastConnect,
 	}
 }
 
@@ -286,15 +288,21 @@ func (m *WSManager) startAllClients() {
 		m.wg.Add(1)
 		go m.startClient(client)
 
-		// 根据连接数动态调整延迟
-		delay := 100 * time.Millisecond
-		if m.numClients > 50 {
-			delay = 200 * time.Millisecond
+		// 根据连接数动态调整延迟（优化连接速度）
+		if !m.fastConnect {
+			delay := 10 * time.Millisecond  // 减少基础延迟
+			if m.numClients > 50 {
+				delay = 20 * time.Millisecond
+			}
+			if m.numClients > 100 {
+				delay = 50 * time.Millisecond
+			}
+			if m.numClients > 500 {
+				delay = 100 * time.Millisecond
+			}
+			time.Sleep(delay)
 		}
-		if m.numClients > 100 {
-			delay = 500 * time.Millisecond
-		}
-		time.Sleep(delay)
+		// 快速连接模式：无延迟
 	}
 }
 
@@ -347,7 +355,7 @@ func loadEnvFile(filename string) error {
 }
 
 // getEnvConfig 从环境变量获取配置
-func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time.Duration, time.Duration, bool, bool) {
+func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time.Duration, time.Duration, bool, bool, bool) {
 	// 首先尝试加载.env文件
 	if err := loadEnvFile(".env"); err != nil {
 		logDebug("未找到.env文件或加载失败: %v", err)
@@ -433,7 +441,13 @@ func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time
 		enableCompression = strings.ToLower(compStr) == "true"
 	}
 
-	return numClients, wsURL, logLevel, reconnect, maxRetries, retryDelay, ignoreMsg, pingInterval, statusInterval, smartPing, enableCompression
+	// 从环境变量获取快速连接，默认为启用
+	fastConnect := true
+	if fastStr := os.Getenv("WS_FAST_CONNECT"); fastStr != "" {
+		fastConnect = strings.ToLower(fastStr) == "true"
+	}
+
+	return numClients, wsURL, logLevel, reconnect, maxRetries, retryDelay, ignoreMsg, pingInterval, statusInterval, smartPing, enableCompression, fastConnect
 }
 
 func main() {
@@ -449,7 +463,7 @@ func main() {
 	flag.Parse()
 
 	// 从环境变量获取配置
-	envClients, envURL, envLogLevel, envReconnect, envMaxRetries, envRetryDelay, envIgnoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression := getEnvConfig()
+	envClients, envURL, envLogLevel, envReconnect, envMaxRetries, envRetryDelay, envIgnoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression, envFastConnect := getEnvConfig()
 
 	// 如果命令行参数为空，则使用环境变量
 	if *numClients == 0 {
@@ -510,11 +524,12 @@ func main() {
 	fmt.Printf("  状态报告间隔: %d秒\n", int(envStatusInterval.Seconds()))
 	fmt.Printf("  智能心跳: %t\n", envSmartPing)
 	fmt.Printf("  启用压缩: %t\n", envEnableCompression)
+	fmt.Printf("  快速连接: %t\n", envFastConnect)
 
 	fmt.Println()
 
 	// 创建WebSocket管理器
-	manager := NewWSManager(*wsURL, *numClients, *reconnect, *maxRetries, time.Duration(*retryDelay)*time.Second, *ignoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression)
+	manager := NewWSManager(*wsURL, *numClients, *reconnect, *maxRetries, time.Duration(*retryDelay)*time.Second, *ignoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression, envFastConnect)
 
 	// 设置信号处理
 	sigChan := make(chan os.Signal, 1)
