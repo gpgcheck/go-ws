@@ -437,9 +437,6 @@ func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time
 }
 
 func main() {
-	// 抑制WebSocket库的噪音日志
-	log.SetOutput(io.Discard)
-
 	var (
 		numClients = flag.Int("clients", 0, "Number of concurrent WebSocket connections (overrides WS_CLIENTS env var)")
 		wsURL      = flag.String("url", "", "WebSocket URL to connect to (overrides WS_URL env var)")
@@ -450,11 +447,6 @@ func main() {
 		ignoreMsg  = flag.Bool("ignore-msg", false, "Ignore received messages (overrides WS_IGNORE_MSG env var)")
 	)
 	flag.Parse()
-
-	// 根据日志级别恢复日志输出
-	if currentLogLevel == DEBUG {
-		log.SetOutput(os.Stderr)
-	}
 
 	// 从环境变量获取配置
 	envClients, envURL, envLogLevel, envReconnect, envMaxRetries, envRetryDelay, envIgnoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression := getEnvConfig()
@@ -489,6 +481,14 @@ func main() {
 	}
 	if !*ignoreMsg {
 		*ignoreMsg = envIgnoreMsg
+	}
+
+	// 根据日志级别设置日志输出
+	if currentLogLevel == DEBUG {
+		log.SetOutput(os.Stderr)
+	} else {
+		// 抑制WebSocket库的噪音日志，但保留错误日志
+		log.SetOutput(io.Discard)
 	}
 
 	// 显示当前配置
