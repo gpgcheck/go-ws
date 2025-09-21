@@ -1,0 +1,8 @@
+.env
+*.log
+ws-client
+.DS_Store
+*.exe
+*.dll
+*.so
+*.dylib
