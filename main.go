@@ -29,6 +29,10 @@ type WSClient struct {
 	RetryDelay   time.Duration
 	RetryCount   int
 	PingInterval time.Duration
+	LastPingTime time.Time
+	LastActivity time.Time
+	PingCount    int
+	SmartPing    bool
 }
 
 // 日志级别
@@ -53,30 +57,34 @@ func logDebug(format string, v ...interface{}) {
 }
 
 type WSManager struct {
-	clients        []*WSClient
-	numClients     int
-	url            string
-	reconnect      bool
-	maxRetries     int
-	retryDelay     time.Duration
-	ignoreMsg      bool
-	pingInterval   time.Duration
-	statusInterval time.Duration
-	mu             sync.RWMutex
-	wg             sync.WaitGroup
+	clients           []*WSClient
+	numClients        int
+	url               string
+	reconnect         bool
+	maxRetries        int
+	retryDelay        time.Duration
+	ignoreMsg         bool
+	pingInterval      time.Duration
+	statusInterval    time.Duration
+	smartPing         bool
+	enableCompression bool
+	mu                sync.RWMutex
+	wg                sync.WaitGroup
 }
 
-func NewWSManager(url string, numClients int, reconnect bool, maxRetries int, retryDelay time.Duration, ignoreMsg bool, pingInterval time.Duration, statusInterval time.Duration) *WSManager {
+func NewWSManager(url string, numClients int, reconnect bool, maxRetries int, retryDelay time.Duration, ignoreMsg bool, pingInterval time.Duration, statusInterval time.Duration, smartPing bool, enableCompression bool) *WSManager {
 	return &WSManager{
-		clients:        make([]*WSClient, 0, numClients),
-		numClients:     numClients,
-		url:            url,
-		reconnect:      reconnect,
-		maxRetries:     maxRetries,
-		retryDelay:     retryDelay,
-		ignoreMsg:      ignoreMsg,
-		pingInterval:   pingInterval,
-		statusInterval: statusInterval,
+		clients:           make([]*WSClient, 0, numClients),
+		numClients:        numClients,
+		url:               url,
+		reconnect:         reconnect,
+		maxRetries:        maxRetries,
+		retryDelay:        retryDelay,
+		ignoreMsg:         ignoreMsg,
+		pingInterval:      pingInterval,
+		statusInterval:    statusInterval,
+		smartPing:         smartPing,
+		enableCompression: enableCompression,
 	}
 }
 
@@ -92,6 +100,10 @@ func (m *WSManager) createClient(id int) *WSClient {
 		RetryDelay:   m.retryDelay,
 		RetryCount:   0,
 		PingInterval: m.pingInterval,
+		LastPingTime: time.Now(),
+		LastActivity: time.Now(),
+		PingCount:    0,
+		SmartPing:    m.smartPing,
 	}
 }
 
@@ -101,14 +113,19 @@ func (c *WSClient) connect() error {
 		return fmt.Errorf("invalid URL: %v", err)
 	}
 
+	// 配置WebSocket拨号器
+	dialer := websocket.DefaultDialer
+	dialer.EnableCompression = true
+
 	// 建立WebSocket连接
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %v", err)
 	}
 
 	c.Conn = conn
 	c.RetryCount = 0 // 重置重试计数
+	c.LastActivity = time.Now()
 	logDebug("Client %d connected to %s", c.ID, c.URL)
 	return nil
 }
@@ -172,6 +189,15 @@ func (c *WSClient) sendPing() {
 		case <-c.Done:
 			return
 		case <-ticker.C:
+			// 智能心跳：只在连接空闲时发送ping
+			if c.SmartPing {
+				// 如果最近有活动，跳过这次ping
+				if time.Since(c.LastActivity) < c.PingInterval/2 {
+					logDebug("Client %d skipping ping due to recent activity", c.ID)
+					continue
+				}
+			}
+
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				logError("Client %d ping failed: %v", c.ID, err)
 
@@ -182,6 +208,10 @@ func (c *WSClient) sendPing() {
 					c.Errors <- fmt.Errorf("ping failed and max retries exceeded: %v", err)
 					return
 				}
+			} else {
+				c.LastPingTime = time.Now()
+				c.PingCount++
+				logDebug("Client %d sent ping (count: %d)", c.ID, c.PingCount)
 			}
 		}
 	}
@@ -217,6 +247,9 @@ func (m *WSManager) startClient(client *WSClient) {
 	for {
 		select {
 		case message := <-client.Messages:
+			// 更新活动时间
+			client.LastActivity = time.Now()
+
 			if !m.ignoreMsg {
 				logDebug("Client %d received: %s", client.ID, string(message))
 			} else {
@@ -301,7 +334,7 @@ func loadEnvFile(filename string) error {
 }
 
 // getEnvConfig 从环境变量获取配置
-func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time.Duration, time.Duration) {
+func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time.Duration, time.Duration, bool, bool) {
 	// 首先尝试加载.env文件
 	if err := loadEnvFile(".env"); err != nil {
 		logDebug("未找到.env文件或加载失败: %v", err)
@@ -359,8 +392,8 @@ func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time
 		ignoreMsg = strings.ToLower(ignoreStr) == "true"
 	}
 
-	// 从环境变量获取心跳间隔，默认为60秒（降低带宽占用）
-	pingInterval := 60 * time.Second
+	// 从环境变量获取心跳间隔，默认为120秒（进一步降低带宽占用）
+	pingInterval := 120 * time.Second
 	if pingStr := os.Getenv("WS_PING_INTERVAL"); pingStr != "" {
 		if ping, err := strconv.Atoi(pingStr); err == nil && ping > 0 {
 			pingInterval = time.Duration(ping) * time.Second
@@ -375,7 +408,19 @@ func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time
 		}
 	}
 
-	return numClients, wsURL, logLevel, reconnect, maxRetries, retryDelay, ignoreMsg, pingInterval, statusInterval
+	// 从环境变量获取智能心跳，默认为启用
+	smartPing := true
+	if smartStr := os.Getenv("WS_SMART_PING"); smartStr != "" {
+		smartPing = strings.ToLower(smartStr) == "true"
+	}
+
+	// 从环境变量获取压缩支持，默认为启用
+	enableCompression := true
+	if compStr := os.Getenv("WS_ENABLE_COMPRESSION"); compStr != "" {
+		enableCompression = strings.ToLower(compStr) == "true"
+	}
+
+	return numClients, wsURL, logLevel, reconnect, maxRetries, retryDelay, ignoreMsg, pingInterval, statusInterval, smartPing, enableCompression
 }
 
 func main() {
@@ -391,7 +436,7 @@ func main() {
 	flag.Parse()
 
 	// 从环境变量获取配置
-	envClients, envURL, envLogLevel, envReconnect, envMaxRetries, envRetryDelay, envIgnoreMsg, envPingInterval, envStatusInterval := getEnvConfig()
+	envClients, envURL, envLogLevel, envReconnect, envMaxRetries, envRetryDelay, envIgnoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression := getEnvConfig()
 
 	// 如果命令行参数为空，则使用环境变量
 	if *numClients == 0 {
@@ -442,11 +487,13 @@ func main() {
 	fmt.Printf("  忽略消息: %t\n", *ignoreMsg)
 	fmt.Printf("  心跳间隔: %d秒\n", int(envPingInterval.Seconds()))
 	fmt.Printf("  状态报告间隔: %d秒\n", int(envStatusInterval.Seconds()))
+	fmt.Printf("  智能心跳: %t\n", envSmartPing)
+	fmt.Printf("  启用压缩: %t\n", envEnableCompression)
 
 	fmt.Println()
 
 	// 创建WebSocket管理器
-	manager := NewWSManager(*wsURL, *numClients, *reconnect, *maxRetries, time.Duration(*retryDelay)*time.Second, *ignoreMsg, envPingInterval, envStatusInterval)
+	manager := NewWSManager(*wsURL, *numClients, *reconnect, *maxRetries, time.Duration(*retryDelay)*time.Second, *ignoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression)
 
 	// 设置信号处理
 	sigChan := make(chan os.Signal, 1)
