@@ -1,7 +1,10 @@
 module go-ws
 
-go 1.21
+go 1.24.0
 
-require github.com/gorilla/websocket v1.5.1
+toolchain go1.24.7
 
-require golang.org/x/net v0.17.0 // indirect
+require (
+	github.com/gorilla/websocket v1.5.3
+	golang.org/x/net v0.44.0
+)

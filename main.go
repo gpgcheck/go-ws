@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/net/proxy"
 )
 
 type WSClient struct {
@@ -34,6 +37,7 @@ type WSClient struct {
 	LastActivity time.Time
 	PingCount    int
 	SmartPing    bool
+	ProxyURL     string
 	closed       bool
 	mu           sync.Mutex
 }
@@ -72,11 +76,12 @@ type WSManager struct {
 	smartPing         bool
 	enableCompression bool
 	fastConnect       bool
+	proxyURL          string
 	mu                sync.RWMutex
 	wg                sync.WaitGroup
 }
 
-func NewWSManager(url string, numClients int, reconnect bool, maxRetries int, retryDelay time.Duration, ignoreMsg bool, pingInterval time.Duration, statusInterval time.Duration, smartPing bool, enableCompression bool, fastConnect bool) *WSManager {
+func NewWSManager(url string, numClients int, reconnect bool, maxRetries int, retryDelay time.Duration, ignoreMsg bool, pingInterval time.Duration, statusInterval time.Duration, smartPing bool, enableCompression bool, fastConnect bool, proxyURL string) *WSManager {
 	return &WSManager{
 		clients:           make([]*WSClient, 0, numClients),
 		numClients:        numClients,
@@ -90,6 +95,7 @@ func NewWSManager(url string, numClients int, reconnect bool, maxRetries int, re
 		smartPing:         smartPing,
 		enableCompression: enableCompression,
 		fastConnect:       fastConnect,
+		proxyURL:          proxyURL,
 	}
 }
 
@@ -109,6 +115,7 @@ func (m *WSManager) createClient(id int) *WSClient {
 		LastActivity: time.Now(),
 		PingCount:    0,
 		SmartPing:    m.smartPing,
+		ProxyURL:     m.proxyURL,
 	}
 }
 
@@ -122,6 +129,34 @@ func (c *WSClient) connect(enableCompression bool) error {
 	dialer := websocket.DefaultDialer
 	dialer.EnableCompression = enableCompression
 
+	// 配置代理
+	if c.ProxyURL != "" {
+		proxyURL, err := url.Parse(c.ProxyURL)
+		if err != nil {
+			return fmt.Errorf("invalid proxy URL: %v", err)
+		}
+
+		// 根据代理类型选择不同的配置方式
+		switch proxyURL.Scheme {
+		case "socks5", "socks4":
+			// SOCKS代理
+			dialer.NetDial = func(network, addr string) (net.Conn, error) {
+				dialer, err := proxy.SOCKS5("tcp", proxyURL.Host, nil, proxy.Direct)
+				if err != nil {
+					return nil, err
+				}
+				return dialer.Dial(network, addr)
+			}
+			logDebug("Client %d using SOCKS proxy: %s", c.ID, c.ProxyURL)
+		case "http", "https":
+			// HTTP代理
+			dialer.Proxy = http.ProxyURL(proxyURL)
+			logDebug("Client %d using HTTP proxy: %s", c.ID, c.ProxyURL)
+		default:
+			return fmt.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
+		}
+	}
+
 	// 建立WebSocket连接
 	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
@@ -131,7 +166,7 @@ func (c *WSClient) connect(enableCompression bool) error {
 	c.Conn = conn
 	c.RetryCount = 0 // 重置重试计数
 	c.LastActivity = time.Now()
-	logDebug("Client %d connected to %s (compression: %t)", c.ID, c.URL, enableCompression)
+	logDebug("Client %d connected to %s (compression: %t, proxy: %s)", c.ID, c.URL, enableCompression, c.ProxyURL)
 	return nil
 }
 
@@ -355,7 +390,7 @@ func loadEnvFile(filename string) error {
 }
 
 // getEnvConfig 从环境变量获取配置
-func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time.Duration, time.Duration, bool, bool, bool) {
+func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time.Duration, time.Duration, bool, bool, bool, string) {
 	// 首先尝试加载.env文件
 	if err := loadEnvFile(".env"); err != nil {
 		logDebug("未找到.env文件或加载失败: %v", err)
@@ -447,7 +482,10 @@ func getEnvConfig() (int, string, LogLevel, bool, int, time.Duration, bool, time
 		fastConnect = strings.ToLower(fastStr) == "true"
 	}
 
-	return numClients, wsURL, logLevel, reconnect, maxRetries, retryDelay, ignoreMsg, pingInterval, statusInterval, smartPing, enableCompression, fastConnect
+	// 从环境变量获取代理URL，默认为空（不使用代理）
+	proxyURL := os.Getenv("WS_PROXY_URL")
+
+	return numClients, wsURL, logLevel, reconnect, maxRetries, retryDelay, ignoreMsg, pingInterval, statusInterval, smartPing, enableCompression, fastConnect, proxyURL
 }
 
 func main() {
@@ -459,11 +497,12 @@ func main() {
 		maxRetries = flag.Int("retries", 0, "Max retry attempts (overrides WS_MAX_RETRIES env var)")
 		retryDelay = flag.Int("delay", 0, "Retry delay in seconds (overrides WS_RETRY_DELAY env var)")
 		ignoreMsg  = flag.Bool("ignore-msg", false, "Ignore received messages (overrides WS_IGNORE_MSG env var)")
+		proxyURL   = flag.String("proxy", "", "Proxy URL (overrides WS_PROXY_URL env var)")
 	)
 	flag.Parse()
 
 	// 从环境变量获取配置
-	envClients, envURL, envLogLevel, envReconnect, envMaxRetries, envRetryDelay, envIgnoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression, envFastConnect := getEnvConfig()
+	envClients, envURL, envLogLevel, envReconnect, envMaxRetries, envRetryDelay, envIgnoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression, envFastConnect, envProxyURL := getEnvConfig()
 
 	// 如果命令行参数为空，则使用环境变量
 	if *numClients == 0 {
@@ -496,6 +535,9 @@ func main() {
 	if !*ignoreMsg {
 		*ignoreMsg = envIgnoreMsg
 	}
+	if *proxyURL == "" {
+		*proxyURL = envProxyURL
+	}
 
 	// 根据日志级别设置日志输出
 	if currentLogLevel == DEBUG {
@@ -525,11 +567,12 @@ func main() {
 	fmt.Printf("  智能心跳: %t\n", envSmartPing)
 	fmt.Printf("  启用压缩: %t\n", envEnableCompression)
 	fmt.Printf("  快速连接: %t\n", envFastConnect)
+	fmt.Printf("  代理服务器: %s\n", *proxyURL)
 
 	fmt.Println()
 
 	// 创建WebSocket管理器
-	manager := NewWSManager(*wsURL, *numClients, *reconnect, *maxRetries, time.Duration(*retryDelay)*time.Second, *ignoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression, envFastConnect)
+	manager := NewWSManager(*wsURL, *numClients, *reconnect, *maxRetries, time.Duration(*retryDelay)*time.Second, *ignoreMsg, envPingInterval, envStatusInterval, envSmartPing, envEnableCompression, envFastConnect, *proxyURL)
 
 	// 设置信号处理
 	sigChan := make(chan os.Signal, 1)
